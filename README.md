@@ -1,7 +1,8 @@
 # EngineMetrics
 
-A zero-dependency, single-file curses TUI that shows **real-time inference-engine
-metrics** for **vLLM** and **TensorFold** servers. Like `htop` for your LLM engine.
+A zero-dependency curses TUI that shows **real-time inference-engine
+metrics** for **vLLM**, **TensorFold**, **mlx-serve** and **oMLX** servers.
+Like `htop` for your LLM engine.
 
 ```
 ╔══════════════════════════════════════════════════════════════════════╗
@@ -31,14 +32,30 @@ metrics** for **vLLM** and **TensorFold** servers. Like `htop` for your LLM engi
 └────────────────────────────────────────────────────────────────────┘
 ```
 
+## Layout
+
+```
+engine_metrics.py      entrypoint: argparse + curses loop + backend dispatch
+engines/
+  __init__.py          registry (ENGINES) + detect_backend()
+  common.py            HTTP, parsing, formatting, rate math, draw helpers
+  vllm.py              vLLM backend
+  tensorfold.py        TensorFold backend
+  mlx_serve.py         mlx-serve backend
+  omlx.py              oMLX backend
+tests/render_test.py   headless single-frame render harness
+```
+
 ## Why
 
 vLLM ships a full Prometheus `/metrics` endpoint. **TensorFold does not (yet)** — it
 exposes a partial `tensorfold:*` metric surface plus a rich JSON `/health`. **mlx-serve**
-emits both `vllm:*` compat counters and its own `mlx_serve:*` natives. This
-dashboard works with **all three**, auto-detected, so you keep one monitoring tool across
-engines. For TensorFold and mlx-serve it delta-samples the cumulative counters between
-polls to derive live rates — no agent, no exporter, no dependencies.
+emits both `vllm:*` compat counters and its own `mlx_serve:*` natives. **oMLX**
+(omlx-server) has no Prometheus at all — it exposes a JSON admin API with per-slot
+in-flight telemetry. This dashboard works with **all four**, auto-detected, so you
+keep one monitoring tool across engines. Where engines only expose cumulative
+counters, it delta-samples between polls to derive live rates — no agent, no
+exporter, no dependencies.
 
 ## Supported backends
 
@@ -47,8 +64,9 @@ polls to derive live rates — no agent, no exporter, no dependencies.
 | **vLLM** | `vllm:*` keys in `/metrics` | Latency breakdown (E2E/prefill/decode/TTFT/time-per-token), KV cache %, running/waiting, token totals, prefix-cache hit rate |
 | **TensorFold** | `backend: "tensorfold"` in `/health` | Live PP/TG (engine-time + wall-clock), 120s sparklines, stream states, shared-pool occupancy, kept prompts, MTP acceptance, TTFT/latency averages, cache-hit %, multi-prefill stats |
 | **mlx-serve** | `mlx_serve:*` keys in `/metrics` (checked before `vllm:*` — mlx-serve emits both) | Live TG/PP (wall-clock, from `*_live` gauges that include in-flight slots), in-flight prefill progress bar, GPU util + memory footprint, model card (arch/quant/ctx/MTP/resident), 120s sparklines, prefix-cache hit rates, TTFT/latency averages, serial-decode reasons |
+| **oMLX** | `engine_pool` in `/health` (fallback: `models_discovered` in `/api/status`) | Live TG from per-slot `tokens_per_second` (in-flight), native prefill progress bar with ETA (`processed`/`total`/`speed`), loaded-model cards (engine_type/ctx/size), memory pool + pressure levels, cache efficiency, engine cumulative TPS averages, device info (chip/GPU cores), custom-kernel availability |
 
-Auto-detection can be overridden with `--engine {vllm,tensorfold,mlx-serve}`.
+Auto-detection can be overridden with `--engine {vllm,tensorfold,mlx-serve,omlx}`.
 
 ## Install & run
 
@@ -56,15 +74,15 @@ Python 3.8+, stdlib only (curses, urllib, json, re). No pip installs.
 
 ```bash
 python3 engine_metrics.py --host 192.168.1.8 --port 8100          # TensorFold
-python3 engine_metrics.py --host localhost --port 8000            # mlx-serve (auto-detected)
-python3 engine_metrics.py --host localhost --port 8000 --engine mlx-serve   # forced
+python3 engine_metrics.py --host localhost --port 8000            # oMLX / mlx-serve (auto-detected)
+python3 engine_metrics.py --host localhost --port 8000 --engine omlx   # forced
 ```
 
 | Flag | Default | |
 |---|---|---|
 | `--host` | `localhost` | Engine host |
 | `--port` | `8100` | Engine port |
-| `--engine` | `auto` | Force backend (`vllm` / `tensorfold` / `mlx-serve`) instead of auto-detect |
+| `--engine` | `auto` | Force backend (`vllm` / `tensorfold` / `mlx-serve` / `omlx`) instead of auto-detect |
 | `--interval` | `2` | Refresh seconds |
 | `--window` | `15` | Rate-averaging window (samples) |
 
@@ -114,14 +132,35 @@ dashboard uses the natives where they're strictly better:
 - **GPU / footprint** = `mlx_serve:gpu_utilization_pct` and `mlx_serve:memory_mb`
   (phys_footprint), plus `mlx_active_bytes` / `mlx_cache_bytes` / `ngram_warm_bytes`.
 
+## How the oMLX numbers are derived
+
+oMLX (omlx-server v0.7+) has **no Prometheus endpoint** — it exposes a JSON admin
+API. The key insight: `/api/status` totals are **finished-request counters** (zero
+delta during an in-flight stream), but `/admin/api/activity` carries per-slot
+in-flight telemetry:
+
+- **TG live** = Σ `generating[].tokens_per_second` across all loaded models —
+  engine-computed instantaneous rate per in-flight slot.
+- **Prefill progress** = `prefilling[].processed / .total` with engine-computed
+  `.speed` and `.eta` — a native progress bar, no delta-sampling needed.
+- **Averages** = `avg_prefill_tps` / `avg_generation_tps` from `/api/status`
+  (engine cumulative).
+- **Memory** = `model_memory_used/max` pool bar + `memory_pressure` block
+  (current/soft/hard, `pressure_level` colored ok/warn/critical).
+- **Cache** = `cache_efficiency` and `total_cached_tokens`/`total_prompt_tokens`.
+- **Models** = `/v1/models/status` (loaded, engine_type, context length, sizes).
+- **Device** = `/admin/api/device-info` (chip, GPU cores, memory) and
+  `custom_kernels` availability from `/api/status`.
+
 ## Notes
 
 - Works over plain HTTP to any reachable engine endpoint (LAN or SSH-tunneled).
 - Sparklines are session-local (last 120 s while the TUI runs), `·` marks gaps.
 - Handles engine down/restart gracefully (auto re-detects backend, waits).
 - Tested against: vLLM (OpenAI-compatible serving), TensorFold on 2× DGX Spark
-  (GB10) serving GLM-5.3-Flash NVFP4 with native MTP3, mlx-serve (oMLX) on
-  Apple M5 Max serving Qwen3.8-Flash-Next 4-bit with MTP.
+  (GB10) serving GLM-5.3-Flash NVFP4 with native MTP3, mlx-serve on Apple M5 Max
+  serving Qwen3.8-Flash-Next 4-bit with MTP, oMLX (omlx-server v0.7) on Apple
+  M5 Max serving Qwen3.6-35B-A3B / Qwen2.5-7B.
 
 ## License
 
