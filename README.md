@@ -61,7 +61,7 @@ exporter, no dependencies.
 
 | Backend | Detection | What you get |
 |---|---|---|
-| **vLLM** | `vllm:*` keys in `/metrics` | Latency breakdown (E2E/prefill/decode/TTFT/time-per-token), KV cache %, running/waiting, token totals, prefix-cache hit rate |
+| **vLLM** | `vllm:*` keys in `/metrics` | Live PP/TG (engine-time + wall-clock, delta-sampled), 120s sparklines, batch shape (tokens/step), KV occupancy + pool tokens, prefix-cache hit rates (live + cumulative), MTP/spec acceptance with τ and per-position decay, ITL/TTFT/E2E/queue latency with p50/p90/p99 percentiles, preemption warnings, finish-reason accounting, scheduler fairness gauges, tool-call traffic profile, model card from `cache_config_info` |
 | **TensorFold** | `backend: "tensorfold"` in `/health` | Live PP/TG (engine-time + wall-clock), 120s sparklines, stream states, shared-pool occupancy, kept prompts, MTP acceptance, TTFT/latency averages, cache-hit %, multi-prefill stats |
 | **mlx-serve** | `mlx_serve:*` keys in `/metrics` (checked before `vllm:*` — mlx-serve emits both) | Live TG/PP (wall-clock, from `*_live` gauges that include in-flight slots), in-flight prefill progress bar, GPU util + memory footprint, model card (arch/quant/ctx/MTP/resident), 120s sparklines, prefix-cache hit rates, TTFT/latency averages, serial-decode reasons |
 | **oMLX** | `engine_pool` in `/health` (fallback: `models_discovered` in `/api/status`) | Live TG from per-slot `tokens_per_second` (in-flight), native prefill progress bar with ETA (`processed`/`total`/`speed`), loaded-model cards (engine_type/ctx/size), memory pool + pressure levels, cache efficiency, engine cumulative TPS averages, device info (chip/GPU cores), custom-kernel availability |
@@ -106,6 +106,32 @@ delta-samples between polls:
   drafted *tokens* (not rounds), so no vLLM-style ×k multiplier.
 - **Averages** = `request_latency_seconds` / `time_to_first_token_seconds`
   histogram sum ÷ count.
+
+## How the vLLM numbers are derived
+
+vLLM ships a full Prometheus surface (~60 metric families). The dashboard
+delta-samples the cumulative counters between polls — the same technique as the
+TensorFold backend, no agent or exporter needed:
+
+- **TG live (wall)** = Δ`vllm:generation_tokens_total` / Δwall-clock.
+- **TG (engine)** = Δ`generation_tokens_total` / Δ`request_decode_time_seconds_sum`.
+- **PP (wall / engine)** = Δ`prompt_tokens_total` over Δwall-clock or
+  Δ`request_prefill_time_seconds_sum`; **PP computed** uses
+  `request_prefill_kv_computed_tokens` (prefix-cache restores excluded).
+- **Batch shape** = Δ`iteration_tokens_total_sum` / Δ`iteration_tokens_total_count`
+  — average tokens per engine step.
+- **Spec decode** = Δaccepted / Δdraft_tokens (rate), 1 + Δaccepted / Δdrafts (τ),
+  Δdraft_tokens / Δdrafts (k); per-position decay from the
+  `*_per_pos_total{position=N}` counter pairs. Cumulative fallbacks shown when
+  the window has no drafts.
+- **Latency** = histogram Δsum / Δcount for window averages (TTFT, ITL,
+  time/token, E2E, queue); **percentiles** from `_bucket` deltas with linear
+  interpolation inside the bucket.
+- **Cache** = `kv_cache_usage_perc` gauge × `kv_cache_size_tokens` from
+  `cache_config_info` labels (pool row); token/query hit rates from
+  `prompt_tokens_cached_total` and `prefix_cache_{hits,queries}_total` deltas.
+- **Honest gaps**: `—` when a window has no progress (idle engine, no finished
+  requests) or when counters went backwards (engine restart). Never a fake 0.
 
 ## How the mlx-serve numbers are derived
 

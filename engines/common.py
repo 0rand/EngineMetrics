@@ -81,6 +81,84 @@ def get_value(metrics, key, default=0.0):
     return metrics.get(key, default)
 
 
+_LABEL_PAIR_RE = re.compile(r'(\w+)="((?:[^"\\]|\\.)*)"')
+_METRIC_LINE_RE = re.compile(r"^([\w:]+)(?:\{([^}]*)\})?\s+([\d.eE+-]+)$")
+
+
+def parse_labels(label_str):
+    """Parse a Prometheus label string 'k="v",k2="v2"' into a dict."""
+    if not label_str:
+        return {}
+    return {k: v.replace('\\"', '"') for k, v in _LABEL_PAIR_RE.findall(label_str)}
+
+
+def fetch_metrics_labeled(host, port, keep_buckets=False):
+    """Label-aware /metrics parse.
+
+    Returns (flat, series, model_name):
+      flat   — {name: last_value} (backward-compatible with fetch_metrics)
+      series — {name: [(labels_dict, value), ...]} every labeled series kept
+      model_name — first model_name label seen, or None
+
+    `_created` lines are always dropped; `_bucket` lines only kept when
+    keep_buckets=True (they are the raw material for percentile estimates).
+    """
+    try:
+        text = http_get(f"http://{host}:{port}/metrics")
+    except Exception as e:
+        return {"_error": str(e)}, {}, None
+    flat, series, model_name = {}, {}, None
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _METRIC_LINE_RE.match(line)
+        if not m:
+            continue
+        name, labels_s, value = m.group(1), m.group(2) or "", float(m.group(3))
+        if "_created" in name:
+            continue
+        if name.endswith("_bucket") and not keep_buckets:
+            continue
+        labels = parse_labels(labels_s)
+        flat[name] = value
+        series.setdefault(name, []).append((labels, value))
+        if labels.get("model_name") and model_name is None:
+            model_name = labels["model_name"]
+    return flat, series, model_name
+
+
+def percentile_from_buckets(buckets, total, q):
+    """Estimate the q-quantile (0..1) from cumulative histogram buckets.
+
+    buckets: {upper_bound: cumulative_count} (le="+Inf" entries are ignored —
+    they cannot be interpolated). total: total observation count. Linear
+    interpolation inside the bucket, Prometheus-text style. None when empty.
+    """
+    if total <= 0 or not buckets:
+        return None
+    pts = sorted((u, c) for u, c in buckets.items() if u != float("inf"))
+    if not pts:
+        return None
+    target = q * total
+    prev_u, prev_c = 0.0, 0.0
+    for u, c in pts:
+        if c >= target:
+            if c <= prev_c:
+                return u
+            return prev_u + (target - prev_c) / (c - prev_c) * (u - prev_u)
+        prev_u, prev_c = u, c
+    return pts[-1][0]
+
+
+def bucket_delta(cur_buckets, prev_buckets):
+    """Per-bucket deltas between two cumulative bucket dicts (engine restart
+   -safe: negative totals are caught by the caller via total <= 0)."""
+    if prev_buckets is None:
+        return dict(cur_buckets)
+    return {u: c - prev_buckets.get(u, 0.0) for u, c in cur_buckets.items()}
+
+
 def format_num(n):
     if n >= 1e9:
         return f"{n/1e9:.1f}B"
