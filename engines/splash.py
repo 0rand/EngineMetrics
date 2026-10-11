@@ -59,6 +59,12 @@ def _hist_avg(st, *path):
     return _num(st, *path, "sum") / n
 
 
+def _fmt_s(v):
+    if v is None:
+        return "—"
+    return f"{v:.2f}s"
+
+
 def _fmt_ms(v):
     if v is None:
         return "—"
@@ -456,7 +462,7 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval,
              f"p50 {_fmt_ms(cur['itl_p50_ms'])}  p95 {_fmt_ms(cur['itl_p95_ms'])}  (n={format_num(cur['itl_n'])})", width)
     y += 1
     draw_row(stdscr, y, x, "HTTP req:",
-             f"avg {cur['http_avg_s']:.2f}s  prep {_fmt_ms(cur['prep_avg_ms'])}  queue {_fmt_ms(cur['queue_avg_ms'])}  (n={cur['http_n']})",
+             f"avg {_fmt_s(cur['http_avg_s'])}  prep {_fmt_ms(cur['prep_avg_ms'])}  queue {_fmt_ms(cur['queue_avg_ms'])}  (n={cur['http_n']})",
              width)
     y += 1
     acc = cur["draft_rate"] * 100

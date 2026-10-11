@@ -137,6 +137,15 @@ if __name__ == "__main__":
                101000, 55500, 6500.0, True)
         render("splash synthetic", lambda scr: splash.draw(
             scr, b, a, [a, b], time.time() - 60, "localhost", 8001, 2, b["model_name"], rate_hist=None))
+    elif which == "splash-fresh":
+        # regression: /status with almost nothing in it (as on a just-started engine);
+        # sample() must tolerate missing sections and empty histograms (avg -> None)
+        splash.fetch_json = lambda host, port, path: {
+            "schema_version": 6, "ready": False,
+            "latency": {"http_request": {"count": 0, "sum": 0.0}}}
+        cur = splash.sample("localhost", 8001)
+        render("splash fresh", lambda scr: splash.draw(
+            scr, cur, None, [cur], time.time() - 60, "localhost", 8001, 2, cur.get("model_name"), rate_hist=None))
     elif which == "vllm":
         # live: two samples 3s apart against the engine, then render with deltas
         host, port = "localhost", 8100
