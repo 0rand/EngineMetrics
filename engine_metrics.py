@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""vLLM / TensorFold / mlx-serve / oMLX Performance Dashboard TUI — real-time engine monitor.
+"""vLLM / TensorFold / mlx-serve / oMLX / Splash Performance Dashboard TUI — real-time engine monitor.
 
 Auto-detects the backend (see engines/__init__.py), or force it with --engine.
 Each backend lives in engines/<name>.py; shared plumbing in engines/common.py.
@@ -69,7 +69,7 @@ def main(stdscr, args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="vLLM / TensorFold / mlx-serve / oMLX Performance Dashboard TUI")
+    parser = argparse.ArgumentParser(description="vLLM / TensorFold / mlx-serve / oMLX / Splash Performance Dashboard TUI")
     parser.add_argument("--host", default="localhost", help="engine host (default: localhost)")
     parser.add_argument("--port", type=int, default=8100, help="engine port (default: 8100)")
     parser.add_argument("--engine", choices=["auto"] + list(ENGINES), default="auto",

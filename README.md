@@ -1,7 +1,8 @@
 # EngineMetrics
 
 A zero-dependency curses TUI that shows **real-time inference-engine
-metrics** for **vLLM**, **TensorFold**, **mlx-serve** and **oMLX** servers.
+metrics** for **vLLM**, **TensorFold**, **mlx-serve**, **oMLX** and **Splash**
+servers.
 Like `htop` for your LLM engine.
 
 ```
@@ -43,6 +44,7 @@ engines/
   tensorfold.py        TensorFold backend
   mlx_serve.py         mlx-serve backend
   omlx.py              oMLX backend
+  splash.py            Splash backend (Apple silicon, /status JSON)
 tests/render_test.py   headless single-frame render harness
 ```
 
@@ -52,7 +54,11 @@ vLLM ships a full Prometheus `/metrics` endpoint. **TensorFold does not (yet)** 
 exposes a partial `tensorfold:*` metric surface plus a rich JSON `/health`. **mlx-serve**
 emits both `vllm:*` compat counters and its own `mlx_serve:*` natives. **oMLX**
 (omlx-server) has no Prometheus at all — it exposes a JSON admin API with per-slot
-in-flight telemetry. This dashboard works with **all four**, auto-detected, so you
+in-flight telemetry. **Splash** (incoai/splash, the Apple-silicon Metal/ANE engine)
+ships a Prometheus `/metrics` endpoint, but its JSON `/status` endpoint carries the
+same counters plus richer gauges (scheduler states, KV page pool, memory governor,
+thermal state), so the dashboard reads `/status` and delta-samples the cumulative
+counters. This dashboard works with **all five**, auto-detected, so you
 keep one monitoring tool across engines. Where engines only expose cumulative
 counters, it delta-samples between polls to derive live rates — no agent, no
 exporter, no dependencies.
@@ -65,8 +71,9 @@ exporter, no dependencies.
 | **TensorFold** | `backend: "tensorfold"` in `/health` | Live PP/TG (engine-time + wall-clock), 120s sparklines, stream states, shared-pool occupancy, kept prompts, MTP acceptance, TTFT/latency averages, cache-hit %, multi-prefill stats |
 | **mlx-serve** | `mlx_serve:*` keys in `/metrics` (checked before `vllm:*` — mlx-serve emits both) | Live TG/PP (wall-clock, from `*_live` gauges that include in-flight slots), in-flight prefill progress bar, GPU util + memory footprint, model card (arch/quant/ctx/MTP/resident), 120s sparklines, prefix-cache hit rates, TTFT/latency averages, serial-decode reasons |
 | **oMLX** | `engine_pool` in `/health` (fallback: `models_discovered` in `/api/status`) | Live TG from per-slot `tokens_per_second` (in-flight), native prefill progress bar with ETA (`processed`/`total`/`speed`), loaded-model cards (engine_type/ctx/size), memory pool + pressure levels, cache efficiency, engine cumulative TPS averages, device info (chip/GPU cores), custom-kernel availability |
+| **Splash** | `splash_*` keys in `/metrics` (dashboard reads the JSON `/status` mirror) | Live PP/TG (engine-time + wall-clock, delta-sampled), 120s sparklines, scheduler streams + decode batch-width mix (b1–b4), admission queue, KV page-pool occupancy + extent stats, prompt-cache hit rate + state store, memory governor + thermal state, TTFT/ITL p50/p95, DFlash2 draft acceptance, last-batch detail, device card (chip/GPU cores/ANE split) |
 
-Auto-detection can be overridden with `--engine {vllm,tensorfold,mlx-serve,omlx}`.
+Auto-detection can be overridden with `--engine {vllm,tensorfold,mlx-serve,omlx,splash}`.
 
 ## Install & run
 
@@ -76,13 +83,14 @@ Python 3.8+, stdlib only (curses, urllib, json, re). No pip installs.
 python3 engine_metrics.py --host 192.168.1.8 --port 8100          # TensorFold
 python3 engine_metrics.py --host localhost --port 8000            # oMLX / mlx-serve (auto-detected)
 python3 engine_metrics.py --host localhost --port 8000 --engine omlx   # forced
+python3 engine_metrics.py --port 8001                           # Splash (default port 8000; auto-detected)
 ```
 
 | Flag | Default | |
 |---|---|---|
 | `--host` | `localhost` | Engine host |
 | `--port` | `8100` | Engine port |
-| `--engine` | `auto` | Force backend (`vllm` / `tensorfold` / `mlx-serve` / `omlx`) instead of auto-detect |
+| `--engine` | `auto` | Force backend (`vllm` / `tensorfold` / `mlx-serve` / `omlx` / `splash`) instead of auto-detect |
 | `--interval` | `2` | Refresh seconds |
 | `--window` | `15` | Rate-averaging window (samples) |
 
@@ -178,6 +186,43 @@ in-flight telemetry:
 - **Device** = `/admin/api/device-info` (chip, GPU cores, memory) and
   `custom_kernels` availability from `/api/status`.
 
+## How the Splash numbers are derived
+
+Splash (incoai/splash, Apple-silicon Metal/ANE engine) ships a Prometheus
+`/metrics` endpoint, but its JSON `/status` endpoint (schema_version 6) is the
+same data plus richer gauges — the dashboard reads `/status` in a single fetch
+per poll. Its counters are **cumulative** (process-lifetime), so live rates are
+delta-sampled between polls:
+
+- **PP (engine)** = Δ`prefill_input_tokens` / Δ`prefill_wall_ms` — engine-time
+  prefill throughput of the window.
+- **TG (engine)** = Δ`decode_output_tokens` / Δ`decode_wall_ms`; **TG live
+  (wall)** = Δ`decode_output_tokens` / Δwall-clock — the rate you feel.
+- **Lifetime** column = the engine's own cumulative `*_tokens_per_second`
+  gauges — a stable reference when the window is idle.
+- **Last batch** = `current_prefill_batch` / `current_decode_batch` gauges
+  (width, tokens, tok/s, drafted/accepted for speculative batches).
+- **Batch width mix** = `decode_batches_by_width` b1–b4 ÷ `decode_batches`
+  (max width from `memory_plan.budget.maximum_batch_width`).
+- **KV pool** = `kv.pages_allocated` ÷ `memory_plan.budget.kv_capacity_pages`
+  occupancy, with active/cached/free split and extent alloc/release/compact
+  counters.
+- **Prompt cache** = `cache.hit_rate` (+ hits/cold misses), `reused_tokens`,
+  `kv_hit_tokens`, and the persistent state store (`state.entries/bytes/in_use/
+  active_lanes/evictions`); SSD cache block count when `--max-cache-disk` is on.
+- **Memory** = `memory_governor.charged_bytes` ÷ `limit_bytes` bar, plus
+  `memory_actual` current/peak, host-available bytes, and the
+  `memory_pressure` / `thermal_state` gauges.
+- **Latency** = `metrics.ttft_ms` / `metrics.itl_ms` p50/p95 (rolling gauges
+  with sample counts); HTTP/preparation/native-queue averages from the
+  cumulative histogram sum ÷ count in `latency`.
+- **DFlash2 acceptance** = `metrics.draft_acceptance_rate` gauge with the
+  `accepted_draft_tokens` / `drafted_tokens` cumulative counters behind it.
+- **Weights** = `weights.released` flips the line to a red/yellow RELEASED
+  state when the idle-evictor has unloaded the model (default: after 10 m).
+- **Honest gaps**: `—` when a window has no counter progress (idle engine),
+  same convention as the other backends.
+
 ## Notes
 
 - Works over plain HTTP to any reachable engine endpoint (LAN or SSH-tunneled).
@@ -186,7 +231,8 @@ in-flight telemetry:
 - Tested against: vLLM (OpenAI-compatible serving), TensorFold on 2× DGX Spark
   (GB10) serving GLM-5.3-Flash NVFP4 with native MTP3, mlx-serve on Apple M5 Max
   serving Qwen3.8-Flash-Next 4-bit with MTP, oMLX (omlx-server v0.7) on Apple
-  M5 Max serving Qwen3.6-35B-A3B / Qwen2.5-7B.
+  M5 Max serving Qwen3.6-35B-A3B / Qwen2.5-7B, Splash 1.3.1 on Apple M5 Max
+  serving mlx-community/Qwen3.8-27B-8bit (int8 KV, DFlash2 draft, ANE FFN split).
 
 ## License
 

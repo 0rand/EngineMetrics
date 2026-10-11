@@ -5,13 +5,14 @@ Each engine module exposes:
 State dict (owned by the entrypoint): prev, history, rate_hist, start_time, model_name.
 """
 
-from . import mlx_serve, omlx, tensorfold, vllm
+from . import mlx_serve, omlx, splash, tensorfold, vllm
 
 ENGINES = {
     "vllm": vllm,
     "tensorfold": tensorfold,
     "mlx-serve": mlx_serve,
     "omlx": omlx,
+    "splash": splash,
 }
 
 
@@ -34,6 +35,9 @@ def detect_backend(host, port):
         return "vllm"
     if any(k.startswith("tensorfold") for k in m):
         return "tensorfold"
+    # Splash native engine: splash_* gauges/counters in /metrics
+    if any(k.startswith("splash_") for k in m):
+        return "splash"
     # oMLX fallback probe (no /metrics): /api/status has models_discovered
     s = fetch_json(host, port, "/api/status")
     if isinstance(s, dict) and "models_discovered" in s:

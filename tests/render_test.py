@@ -1,6 +1,6 @@
 """Headless render test: one clean frame per engine backend (live where reachable).
 
-Usage: python3 tests/render_test.py [omlx|mlx-serve]
+Usage: python3 tests/render_test.py [omlx|mlx-serve|vllm|splash|splash-synthetic] [host [port]]
 """
 import os
 import sys
@@ -16,6 +16,7 @@ curses.A_BOLD = 0
 
 import engines.mlx_serve as mlx_serve  # noqa: E402
 import engines.omlx as omlx  # noqa: E402
+import engines.splash as splash  # noqa: E402
 import engines.vllm as vllm  # noqa: E402
 
 
@@ -59,6 +60,121 @@ if __name__ == "__main__":
         cur = mlx_serve.sample("localhost", 8000)
         render("mlx-serve :8000", lambda scr: mlx_serve.draw(
             scr, cur, None, [cur], time.time() - 60, "localhost", 8000, 2, rate_hist=None))
+    elif which == "splash":
+        # live: two samples apart against the engine, then render with deltas
+        host = sys.argv[2] if len(sys.argv) > 2 else "localhost"
+        port = int(sys.argv[3]) if len(sys.argv) > 3 else 8001
+        cur = splash.sample(host, port)
+        if not cur.get("_error") and not cur.get("ready"):
+            pass
+        time.sleep(3)
+        cur2 = splash.sample(host, port)
+        render("splash live :%d" % port, lambda scr: splash.draw(
+            scr, cur2, cur, [cur, cur2], time.time() - 60, host, port, 2, cur2.get("model_name"), rate_hist=None))
+    elif which == "splash-synthetic":
+        # offline: fabricated sample pair exercising every panel with data
+        def mk(t, pre_rows, pre_ms, dec_rows, dec_ms, dec_b1, dec_b2, dec_batches,
+               dec, pre, queued, kv_alloc, kv_cap, hits, cold, mem_charged, mem_limit,
+               drafted, accepted, ttft95, busy):
+            s = {
+                "t": t, "_error": None, "ready": True, "pressure": "normal",
+                "thermal": "fair", "max_ctx": 262144,
+                "model_name": "mlx-community/Qwen3.8-27B-8bit",
+                "engine_uptime": 3725.0,
+                "sched_queued": queued, "sched_wait_res": 0, "sched_wait_prefix": 0,
+                "sched_prefilling": pre, "sched_decoding": dec, "sched_wait_mask": 0,
+                "sched_terminal": 0, "prefill_batches": 937, "decode_batches": dec_batches,
+                "max_batch_width": 4, "decode_b1": dec_b1, "decode_b2": dec_b2,
+                "decode_b3": 0, "decode_b4": 0,
+                "adm_waiting": 0, "adm_mem": 0, "adm_conc": 0, "adm_oldest_ms": 0.0,
+                "fe_active": dec + pre, "fe_waiting": 0, "fe_cap": 4,
+                "loop_tick_ms": 120.5,
+                "kv_pages_allocated": kv_alloc, "kv_pages_active": dec * 130 if dec else 130,
+                "kv_pages_cache": 6557, "kv_pages_free": 97, "kv_capacity_pages": kv_cap,
+                "kv_alloc_bytes": kv_alloc * 1064960, "kv_reclaim_bytes": 0,
+                "kv_block_tokens": 32, "kv_extent_alloc": 52, "kv_extent_rel": 0,
+                "kv_extent_compact": 0, "kv_extent_alloc_ms": 31.3, "kv_format": "int8",
+                "cache_hits": hits, "cache_cold": cold, "cache_hit_rate": hits / max(1, hits + cold),
+                "cache_reused": 595904, "cache_kv_hit_tokens": 1206080,
+                "state_entries": 314, "state_in_use": dec, "state_bytes": 50252218368,
+                "state_lanes": 1 if dec else 0, "state_evictions": 0,
+                "disk_capacity": 0, "disk_kv_blocks": 0,
+                "mem_limit": mem_limit, "mem_charged": mem_charged,
+                "mem_headroom": mem_limit - mem_charged, "mem_current": mem_charged,
+                "mem_peak": mem_charged + 2**30, "host_available": 32 * 2**30,
+                "denied_res": 0, "weights_released": False, "idle_release_s": 600,
+                "weight_restores": 1, "weight_failures": 0,
+                "device_name": "Apple M5 Max", "gpu_cores": 40, "physical_mem": 128 * 2**30,
+                "macos": "27.0.1",
+                "drafted": drafted, "accepted": accepted,
+                "draft_rate": accepted / drafted if drafted else 0.0,
+                "draft_ctx_avoided": 53664, "draft_ctx_resets": 39,
+                "ttft_p50_ms": 946.5, "ttft_p95_ms": ttft95, "ttft_n": 318,
+                "itl_p50_ms": 16.1, "itl_p95_ms": 76.3, "itl_n": 4096,
+                "http_avg_s": 6.88, "http_n": 318, "prep_avg_ms": 3.6, "queue_avg_ms": 37.9,
+                "prefill_rows": pre_rows, "prefill_wall_s": pre_ms / 1000.0,
+                "decode_rows": dec_rows, "decode_wall_s": dec_ms / 1000.0,
+                "decode_cycle_s": dec_ms / 1000.0,
+                "pp_lifetime_tps": 549.9, "tg_lifetime_tps": 47.3,
+                "req_submitted": 319, "req_completed": 318, "req_cancelled": 0, "req_failed": 0,
+                "capacity_failures": 0, "metal_failures": 0,
+                "last_ppb_valid": True, "last_ppb_width": 1, "last_ppb_tok": 2048,
+                "last_ppb_tps": 2311.4,
+                "last_tgb_valid": bool(dec), "last_tgb_width": 1, "last_tgb_out": 3,
+                "last_tgb_draft": 7, "last_tgb_acc": 1, "last_tgb_tps": 39.2,
+                "metal_healthy": True, "transport_ready": True, "transport_pending": 0,
+                "transport_pending_limit": 32, "transport_restarts": 0,
+                "ane_state": "split", "ane_share": 0.206,
+                "warmup_prefill": True, "warmup_b": True, "warmup_restore": True,
+                "busy": busy,
+            }
+            return s
+        a = mk(1000.0, 222000, 420000.0, 70000, 1500000.0, 15000, 42, 15042,
+               1, 1, 0, 6656, 75008, 310, 3, 90 * 2**30, 113 * 2**30,
+               100000, 55000, 6400.0, True)
+        b = mk(1002.0, 224000, 430000.0, 70300, 1505000.0, 15040, 42, 15082,
+               1, 0, 0, 6656, 75008, 312, 3, 90.5 * 2**30, 113 * 2**30,
+               101000, 55500, 6500.0, True)
+        render("splash synthetic", lambda scr: splash.draw(
+            scr, b, a, [a, b], time.time() - 60, "localhost", 8001, 2, b["model_name"], rate_hist=None))
+    elif which == "splash-fresh":
+        # regression: /status with almost nothing in it (as on a just-started engine);
+        # sample() must tolerate missing sections and empty histograms (avg -> None)
+        splash.fetch_json = lambda host, port, path: {
+            "schema_version": 6, "ready": False,
+            "latency": {"http_request": {"count": 0, "sum": 0.0}}}
+        cur = splash.sample("localhost", 8001)
+        render("splash fresh", lambda scr: splash.draw(
+            scr, cur, None, [cur], time.time() - 60, "localhost", 8001, 2, cur.get("model_name"), rate_hist=None))
+    elif which == "splash-robust":
+        # regressions: (1) NaN/Infinity accepted by json.loads must not crash sample();
+        # (2) a counter reset (engine restart) must not yield negative rates
+        import json as _json
+        from collections import deque
+        from types import SimpleNamespace
+        splash.fetch_json = lambda h, p, path: _json.loads(
+            '{"ready": true, "scheduler": {"queued": NaN, "decoding": Infinity},'
+            ' "kv": {"pages_allocated": -Infinity}}')
+        cur = splash.sample("localhost", 8001)
+        assert cur["sched_queued"] == 0 and cur["sched_decoding"] == 0, cur
+        print("nan/inf: OK")
+
+        def st(pt, pms, dt, dms):
+            return {"ready": True, "metrics": {"prefill_input_tokens": pt, "prefill_wall_ms": pms,
+                                               "decode_output_tokens": dt, "decode_wall_ms": dms}}
+        state = {"start_time": time.time(), "prev": None, "history": deque(maxlen=15),
+                 "rate_hist": deque(), "model_name": None}
+        args = SimpleNamespace(host="localhost", port=8001, interval=2)
+        for i, s in enumerate([st(1000, 2000.0, 500, 10000.0), st(1100, 2200.0, 600, 12000.0),
+                               st(10, 20.0, 5, 100.0)]):   # last one = restarted engine
+            splash.fetch_json = lambda h, p, path, s=s: s
+            scr = FakeScr()
+            splash.tick(scr, args, state)
+            time.sleep(0.2)
+            line = next(l for l in scr.buf if "TG live" in l)
+            assert "-" not in line, line      # em dash is fine, an ASCII minus is not
+        assert len(state["history"]) == 1, len(state["history"])   # window dropped at restart
+        print("restart: OK")
     elif which == "vllm":
         # live: two samples 3s apart against the engine, then render with deltas
         host, port = "localhost", 8100
