@@ -9,6 +9,7 @@ acceptance and TTFT/ITL percentiles are gauges read straight off the status.
 """
 
 import curses
+import math
 import time
 from datetime import datetime
 
@@ -29,6 +30,8 @@ def _num(d, *path, default=0.0):
             return default
         cur = cur[k]
     if isinstance(cur, bool) or not isinstance(cur, (int, float)):
+        return default
+    if not math.isfinite(cur):  # json.loads accepts NaN/Infinity; int() would raise
         return default
     return float(cur)
 
@@ -237,8 +240,27 @@ def sample(host, port):
     return s
 
 
+_MONOTONIC = ("prefill_rows", "prefill_wall_s", "decode_rows", "decode_wall_s")
+
+
+def _restarted(cur, prev):
+    """True when a cumulative counter went backwards (engine restarted)."""
+    return prev is not None and any(cur[k] < prev[k] for k in _MONOTONIC)
+
+
+def _pos(v):
+    """Rates are never negative; a negative value means counters reset."""
+    return v if v is None or v >= 0 else None
+
+
 def tick(stdscr, args, state):
     cur = sample(args.host, args.port)
+    if not cur.get("_error") and _restarted(cur, state["prev"]):
+        # drop deltas/averages/sparklines that would span the restart
+        state["prev"] = None
+        state["history"].clear()
+        state["rate_hist"].clear()
+        state["model_name"] = None
     if not state["model_name"] and cur.get("model_name"):
         state["model_name"] = cur["model_name"]
     if not cur.get("_error"):
@@ -305,12 +327,12 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval,
     y += 1
 
     # ---- Live throughput (delta-sampled) ----
-    pp_rate = rate(cur, prev, "prefill_rows", "prefill_wall_s")
-    tg_rate = rate(cur, prev, "decode_rows", "decode_wall_s")
-    tg_live = wall_rate(cur, prev, "decode_rows")
-    pp_avg = avg_rate(history, "prefill_rows", "prefill_wall_s")
-    tg_avg = avg_rate(history, "decode_rows", "decode_wall_s")
-    tg_live_avg = avg_wall_rate(history, "decode_rows")
+    pp_rate = _pos(rate(cur, prev, "prefill_rows", "prefill_wall_s"))
+    tg_rate = _pos(rate(cur, prev, "decode_rows", "decode_wall_s"))
+    tg_live = _pos(wall_rate(cur, prev, "decode_rows"))
+    pp_avg = _pos(avg_rate(history, "prefill_rows", "prefill_wall_s"))
+    tg_avg = _pos(avg_rate(history, "decode_rows", "decode_wall_s"))
+    tg_live_avg = _pos(avg_wall_rate(history, "decode_rows"))
 
     if rate_hist is not None:
         rate_hist.append((cur["t"], pp_rate, tg_live if tg_live is not None else tg_rate))

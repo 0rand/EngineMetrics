@@ -146,6 +146,35 @@ if __name__ == "__main__":
         cur = splash.sample("localhost", 8001)
         render("splash fresh", lambda scr: splash.draw(
             scr, cur, None, [cur], time.time() - 60, "localhost", 8001, 2, cur.get("model_name"), rate_hist=None))
+    elif which == "splash-robust":
+        # regressions: (1) NaN/Infinity accepted by json.loads must not crash sample();
+        # (2) a counter reset (engine restart) must not yield negative rates
+        import json as _json
+        from collections import deque
+        from types import SimpleNamespace
+        splash.fetch_json = lambda h, p, path: _json.loads(
+            '{"ready": true, "scheduler": {"queued": NaN, "decoding": Infinity},'
+            ' "kv": {"pages_allocated": -Infinity}}')
+        cur = splash.sample("localhost", 8001)
+        assert cur["sched_queued"] == 0 and cur["sched_decoding"] == 0, cur
+        print("nan/inf: OK")
+
+        def st(pt, pms, dt, dms):
+            return {"ready": True, "metrics": {"prefill_input_tokens": pt, "prefill_wall_ms": pms,
+                                               "decode_output_tokens": dt, "decode_wall_ms": dms}}
+        state = {"start_time": time.time(), "prev": None, "history": deque(maxlen=15),
+                 "rate_hist": deque(), "model_name": None}
+        args = SimpleNamespace(host="localhost", port=8001, interval=2)
+        for i, s in enumerate([st(1000, 2000.0, 500, 10000.0), st(1100, 2200.0, 600, 12000.0),
+                               st(10, 20.0, 5, 100.0)]):   # last one = restarted engine
+            splash.fetch_json = lambda h, p, path, s=s: s
+            scr = FakeScr()
+            splash.tick(scr, args, state)
+            time.sleep(0.2)
+            line = next(l for l in scr.buf if "TG live" in l)
+            assert "-" not in line, line      # em dash is fine, an ASCII minus is not
+        assert len(state["history"]) == 1, len(state["history"])   # window dropped at restart
+        print("restart: OK")
     elif which == "vllm":
         # live: two samples 3s apart against the engine, then render with deltas
         host, port = "localhost", 8100
