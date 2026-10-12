@@ -80,7 +80,13 @@ def sample(host, port):
         # live count for the wall-clock TG rate. ASSUMPTION: the gauge drops by exactly
         # what the counter gains at finish; only checked empirically on a short window.
         s["completion_tokens_total"] = gen_total + gen_running
-    # tokens actually prefilled: with /metrics the prompt counter includes cache hits
+    # Is any cached-token counter exposed? One server build exposed
+    # prompt_tokens_cached_total, a later restart did not; absent != zero.
+    s["cache_known"] = ("cached_tokens_total" in health
+                        or "tensorfold:prompt_tokens_cached_total" in metrics)
+    # tokens actually prefilled: in one measured build the /metrics prompt counter
+    # included cache hits, so subtract them. Without a cached counter the split is
+    # unknown (prompt may or may not include cached tokens); draw() then shows n/a.
     if "prompt_tokens_total" in health:
         s["prefill_tokens_total"] = s["prompt_tokens_total"]
     else:
@@ -159,13 +165,14 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
 
     # ---- Live throughput (delta-sampled) ----
     # engine-time rates (finished-request based, health counters mirror /metrics)
-    pp_engine_rate = rate(cur, prev, "prefill_tokens_total", "prefill_seconds_total")
+    cache_known = cur.get("cache_known", True)
+    pp_engine_rate = rate(cur, prev, "prefill_tokens_total", "prefill_seconds_total") if cache_known else None
     tg_engine_rate = rate(cur, prev, "generation_tokens_total", "decode_seconds_total")
     # live wall rates (completion_tokens_total includes in-flight replies)
     tg_live = wall_rate(cur, prev, "completion_tokens_total")
     pp_live = wall_rate(cur, prev, "prompt_tokens_total")
     # window averages
-    pp_eng_avg = avg_rate(history, "prefill_tokens_total", "prefill_seconds_total")
+    pp_eng_avg = avg_rate(history, "prefill_tokens_total", "prefill_seconds_total") if cache_known else None
     tg_eng_avg = avg_rate(history, "generation_tokens_total", "decode_seconds_total")
     tg_live_avg = avg_wall_rate(history, "completion_tokens_total")
 
@@ -176,7 +183,10 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
 
     draw_box_start(stdscr, y, x, width, "Live Throughput (delta-sampled)")
     y += 1
-    draw_row(stdscr, y, x, "Prefill PP (engine):", f"{format_speed(pp_engine_rate)} tok/s   avg {format_speed(pp_eng_avg)}", width)
+    if cache_known:
+        draw_row(stdscr, y, x, "Prefill PP (engine):", f"{format_speed(pp_engine_rate)} tok/s   avg {format_speed(pp_eng_avg)}", width)
+    else:
+        draw_row(stdscr, y, x, "Prefill PP (engine):", "n/a (no cached-token metric; see Engine-reported)", width, value_color=COLOR_DIM)
     y += 1
     draw_row(stdscr, y, x, "Decode TG (engine):", f"{format_speed(tg_engine_rate)} tok/s   avg {format_speed(tg_eng_avg)}", width)
     y += 1
@@ -261,6 +271,7 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
     ptok = cur["prompt_tokens_total"]
     ctok = cur["cached_tokens_total"]
     hit = ctok / ptok * 100 if ptok else 0.0
+    cache_known = cur.get("cache_known", True)
 
     draw_box_start(stdscr, y, x, width, "Averages (cumulative)")
     y += 1
@@ -273,8 +284,11 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
         acc_color = COLOR_DIM
     draw_row(stdscr, y, x, "MTP Acceptance:", f"{acc_rate:.1f}%  ({format_num(accepted)}/{format_num(drafted)})", width, value_color=acc_color)
     y += 1
-    hit_color = COLOR_GREEN if hit >= 70 else COLOR_WARN
-    draw_row(stdscr, y, x, "Cache Hit (tokens):", f"{hit:.1f}%  ({format_num(ctok)}/{format_num(ptok)})", width, value_color=hit_color)
+    if cache_known:
+        hit_color = COLOR_GREEN if hit >= 70 else COLOR_WARN
+        draw_row(stdscr, y, x, "Cache Hit (tokens):", f"{hit:.1f}%  ({format_num(ctok)}/{format_num(ptok)})", width, value_color=hit_color)
+    else:
+        draw_row(stdscr, y, x, "Cache Hit (tokens):", "n/a (server exposes no cached-token metric)", width, value_color=COLOR_DIM)
     y += 1
     draw_box_end(stdscr, y, x, width)
     y += 1
