@@ -9,7 +9,7 @@ from datetime import datetime
 from .common import (
     COLOR_BORDER, COLOR_DIM, COLOR_GOOD, COLOR_GREEN, COLOR_RED, COLOR_TITLE,
     COLOR_WARN, avg_rate, avg_wall_rate, draw_bar_row, draw_box_end,
-    draw_box_start, draw_row, fetch_json, fetch_metrics, format_num,
+    draw_box_start, draw_row, fetch_json, fetch_metrics_labeled, format_num,
     format_speed, format_uptime, get_value, prune_rate_hist, rate, sparkline,
     wall_rate,
 )
@@ -25,6 +25,9 @@ TF_COUNTERS = [
     "tensorfold:time_to_first_token_seconds_count",
 ]
 
+# The original code read these from /health. A server observed on localhost:8080
+# returns only a slim /health (status, live{...}, max_batch_size, ...) without them.
+# /health still wins when it carries the key; otherwise fall back to /metrics below.
 HEALTH_COUNTERS = [
     "requests_total", "prompt_tokens_total", "completion_tokens_total",
     "cached_tokens_total", "rounds_total", "drafted_total", "accepted_total",
@@ -32,23 +35,78 @@ HEALTH_COUNTERS = [
     "pool_tokens", "pool_free_tokens", "kept_prompts", "context_length",
 ]
 
+METRIC_FALLBACK = {
+    "requests_total": "tensorfold:request_latency_seconds_count",   # finished requests
+    "prompt_tokens_total": "tensorfold:prompt_tokens_total",
+    "cached_tokens_total": "tensorfold:prompt_tokens_cached_total",
+    "rounds_total": "tensorfold:decode_rounds_total",
+    "drafted_total": "tensorfold:mtp_drafted_total",
+    "accepted_total": "tensorfold:mtp_accepted_total",
+    "prefill_seconds_total": "tensorfold:request_prefill_seconds_sum",
+    "decode_seconds_total": "tensorfold:request_decode_seconds_sum",
+}
+
+
+def _num(v):
+    try:
+        v = float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return v if v == v and abs(v) != float("inf") else 0.0
+
 
 def sample(host, port):
     """One TensorFold sample: wall time + counters from /metrics + /health."""
-    metrics, _ = fetch_metrics(host, port)
-    health = fetch_json(host, port, "/health") or {}
+    metrics, series, _ = fetch_metrics_labeled(host, port)
+    health = fetch_json(host, port, "/health")
+    if not isinstance(health, dict):
+        health = {}
     s = {"t": time.time(), "_error": metrics.get("_error")}
     for k in TF_COUNTERS:
         s[k] = get_value(metrics, k)
     for k in HEALTH_COUNTERS:
-        s[k] = float(health.get(k, 0) or 0)
-    # generation tokens only exist as a /metrics counter (health has completion_tokens_total)
-    s["generation_tokens_total"] = get_value(metrics, "tensorfold:generation_tokens_total")
-    streams = health.get("streams", {}) or {}
-    s["streams"] = streams
+        if k in health:
+            s[k] = _num(health[k])
+        elif k in METRIC_FALLBACK:
+            s[k] = _num(get_value(metrics, METRIC_FALLBACK[k]))
+        else:
+            s[k] = 0.0
+    gen_total = _num(get_value(metrics, "tensorfold:generation_tokens_total"))
+    gen_running = _num(get_value(metrics, "tensorfold:generation_tokens_running"))
+    s["generation_tokens_total"] = gen_total
+    if "completion_tokens_total" not in health:
+        # generation_tokens_total appears to move only when a request finishes, while
+        # generation_tokens_running looks like in-flight tokens. Their sum is used as a
+        # live count for the wall-clock TG rate. ASSUMPTION: the gauge drops by exactly
+        # what the counter gains at finish; only checked empirically on a short window.
+        s["completion_tokens_total"] = gen_total + gen_running
+    # Is any cached-token counter exposed? One server build exposed
+    # prompt_tokens_cached_total, a later restart did not; absent != zero.
+    s["cache_known"] = ("cached_tokens_total" in health
+                        or "tensorfold:prompt_tokens_cached_total" in metrics)
+    # tokens actually prefilled: in one measured build the /metrics prompt counter
+    # included cache hits, so subtract them. Without a cached counter the split is
+    # unknown (prompt may or may not include cached tokens); draw() then shows n/a.
+    if "prompt_tokens_total" in health:
+        s["prefill_tokens_total"] = s["prompt_tokens_total"]
+    else:
+        s["prefill_tokens_total"] = max(s["prompt_tokens_total"] - s["cached_tokens_total"], 0.0)
+    s["requests_running"] = _num(get_value(metrics, "tensorfold:requests_running",
+                                           get_value(metrics, "tensorfold:num_requests_running")))
+    s["requests_waiting"] = _num(get_value(metrics, "tensorfold:requests_waiting",
+                                           get_value(metrics, "tensorfold:num_requests_waiting")))
+    s["kv_ratios"] = [(lb.get("pool", lb.get("stream", "?")), _num(v))
+                      for lb, v in series.get("tensorfold:kv_cache_usage_ratio", [])]
+    s["streams"] = health.get("streams", {}) or {}
     s["multi_prefill"] = health.get("multi_prefill", {}) or {}
-    s["busy"] = bool(health.get("busy", False))
-    s["ok"] = bool(health.get("ok", False))
+    live = health.get("live")
+    s["live"] = live if isinstance(live, dict) else {}
+    s["max_batch_size"] = _num(health.get("max_batch_size"))
+    if "busy" in health:
+        s["busy"] = bool(health["busy"])
+    else:
+        s["busy"] = s["requests_running"] > 0 or s["requests_waiting"] > 0
+    s["ok"] = bool(health.get("ok", health.get("status") == "ok"))
     return s
 
 
@@ -58,14 +116,17 @@ def tick(stdscr, args, state):
         mm = fetch_json(args.host, args.port, "/v1/models")
         if mm and mm.get("data"):
             state["model_name"] = mm["data"][0].get("id")
+            state["context_length"] = mm["data"][0].get("context_length")
     if not cur.get("_error"):
         state["history"].append(cur)
     draw(stdscr, cur, state["prev"], state["history"], state["start_time"],
-         args.host, args.port, args.interval, state["model_name"], state["rate_hist"])
+         args.host, args.port, args.interval, state["model_name"], state["rate_hist"],
+         ctx_len=state.get("context_length"))
     state["prev"] = cur if not cur.get("_error") else state["prev"]
 
 
-def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_name, rate_hist=None):
+def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_name, rate_hist=None,
+         ctx_len=None):
     stdscr.erase()
     height, width = stdscr.getmaxyx()
     x = 0
@@ -104,13 +165,14 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
 
     # ---- Live throughput (delta-sampled) ----
     # engine-time rates (finished-request based, health counters mirror /metrics)
-    pp_engine_rate = rate(cur, prev, "prompt_tokens_total", "prefill_seconds_total")
+    cache_known = cur.get("cache_known", True)
+    pp_engine_rate = rate(cur, prev, "prefill_tokens_total", "prefill_seconds_total") if cache_known else None
     tg_engine_rate = rate(cur, prev, "generation_tokens_total", "decode_seconds_total")
     # live wall rates (completion_tokens_total includes in-flight replies)
     tg_live = wall_rate(cur, prev, "completion_tokens_total")
     pp_live = wall_rate(cur, prev, "prompt_tokens_total")
     # window averages
-    pp_eng_avg = avg_rate(history, "prompt_tokens_total", "prefill_seconds_total")
+    pp_eng_avg = avg_rate(history, "prefill_tokens_total", "prefill_seconds_total") if cache_known else None
     tg_eng_avg = avg_rate(history, "generation_tokens_total", "decode_seconds_total")
     tg_live_avg = avg_wall_rate(history, "completion_tokens_total")
 
@@ -121,7 +183,10 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
 
     draw_box_start(stdscr, y, x, width, "Live Throughput (delta-sampled)")
     y += 1
-    draw_row(stdscr, y, x, "Prefill PP (engine):", f"{format_speed(pp_engine_rate)} tok/s   avg {format_speed(pp_eng_avg)}", width)
+    if cache_known:
+        draw_row(stdscr, y, x, "Prefill PP (engine):", f"{format_speed(pp_engine_rate)} tok/s   avg {format_speed(pp_eng_avg)}", width)
+    else:
+        draw_row(stdscr, y, x, "Prefill PP (engine):", "n/a (no cached-token metric; see Engine-reported)", width, value_color=COLOR_DIM)
     y += 1
     draw_row(stdscr, y, x, "Decode TG (engine):", f"{format_speed(tg_engine_rate)} tok/s   avg {format_speed(tg_eng_avg)}", width)
     y += 1
@@ -129,11 +194,22 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
     draw_row(stdscr, y, x, "TG live (wall):", f"{format_speed(tg_live)} tok/s   avg {format_speed(tg_live_avg)}", width, value_color=tg_color)
     y += 1
     st = cur["streams"]
-    draw_row(stdscr, y, x, "Streams:",
-             f"decoding {int(st.get('decoding', 0))}  prefilling {int(st.get('prefilling', 0))}  "
-             f"filling {int(st.get('filling', 0))}  paused {int(st.get('paused', 0))}  / max {int(st.get('max', 0))}",
-             width)
+    if st:
+        draw_row(stdscr, y, x, "Streams:",
+                 f"decoding {int(st.get('decoding', 0))}  prefilling {int(st.get('prefilling', 0))}  "
+                 f"filling {int(st.get('filling', 0))}  paused {int(st.get('paused', 0))}  / max {int(st.get('max', 0))}",
+                 width)
+    else:
+        draw_row(stdscr, y, x, "Requests:",
+                 f"running {int(cur['requests_running'])}  waiting {int(cur['requests_waiting'])}  "
+                 f"/ max batch {int(cur['max_batch_size'])}", width)
     y += 1
+    lv = cur["live"]
+    if lv:
+        draw_row(stdscr, y, x, "Engine-reported:",
+                 f"TG {format_speed(_num(lv.get('decode_tokens_per_second')))} tok/s   "
+                 f"PP {format_speed(_num(lv.get('prefill_tokens_per_second')))} tok/s", width)
+        y += 1
     # 120s sparklines (PP engine rate, TG live rate)
     if rate_hist is not None and len(rate_hist) >= 2:
         pp_pts = [r[1] for r in rate_hist]
@@ -153,21 +229,32 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
     pool = cur["pool_tokens"]
     free = cur["pool_free_tokens"]
     used_pct = (pool - free) / pool * 100 if pool > 0 else 0.0
-    kv_ratio = get_value(cur, "tensorfold:kv_cache_usage_ratio") * 100
-    kept = int(cur["kept_prompts"])
-    ctx = int(cur["context_length"])
-    cache_color = COLOR_GREEN if used_pct < 70 else COLOR_WARN if used_pct < 90 else COLOR_RED
+    ratios = cur["kv_ratios"]
+    kv_ratio = max((v for _, v in ratios), default=0.0) * 100
+    ctx = int(cur["context_length"] or ctx_len or 0)
 
     draw_box_start(stdscr, y, x, width, "Live Cache")
     y += 1
-    draw_bar_row(stdscr, y, x, "Pool occupancy:", used_pct, width, cache_color)
-    y += 1
-    draw_row(stdscr, y, x, "Pool:", f"{format_num(pool - free)} / {format_num(pool)} rows free {format_num(free)}", width)
-    y += 1
-    draw_row(stdscr, y, x, "Stream KV ratio:", f"{kv_ratio:.1f}% (per-stream / ctx window)", width)
-    y += 1
-    draw_row(stdscr, y, x, "Kept prompts:", f"{kept}   context window {format_num(ctx)}", width)
-    y += 1
+    if pool > 0:
+        cache_color = COLOR_GREEN if used_pct < 70 else COLOR_WARN if used_pct < 90 else COLOR_RED
+        draw_bar_row(stdscr, y, x, "Pool occupancy:", used_pct, width, cache_color)
+        y += 1
+        draw_row(stdscr, y, x, "Pool:", f"{format_num(pool - free)} / {format_num(pool)} rows free {format_num(free)}", width)
+        y += 1
+        draw_row(stdscr, y, x, "Stream KV ratio:", f"{kv_ratio:.1f}% (per-stream / ctx window)", width)
+        y += 1
+        draw_row(stdscr, y, x, "Kept prompts:", f"{int(cur['kept_prompts'])}   context window {format_num(ctx)}", width)
+        y += 1
+    else:
+        # slim /health: no shared-pool or kept-prompts info, only per-pool KV ratios
+        cache_color = COLOR_GREEN if kv_ratio < 70 else COLOR_WARN if kv_ratio < 90 else COLOR_RED
+        draw_bar_row(stdscr, y, x, "KV usage (max):", kv_ratio, width, cache_color)
+        y += 1
+        per = "  ".join(f"{p}:{v * 100:.1f}%" for p, v in ratios) or "n/a"
+        draw_row(stdscr, y, x, "KV per pool:", per, width)
+        y += 1
+        draw_row(stdscr, y, x, "Context window:", format_num(ctx) if ctx else "n/a", width)
+        y += 1
     draw_box_end(stdscr, y, x, width)
     y += 1
 
@@ -184,6 +271,7 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
     ptok = cur["prompt_tokens_total"]
     ctok = cur["cached_tokens_total"]
     hit = ctok / ptok * 100 if ptok else 0.0
+    cache_known = cur.get("cache_known", True)
 
     draw_box_start(stdscr, y, x, width, "Averages (cumulative)")
     y += 1
@@ -196,8 +284,11 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
         acc_color = COLOR_DIM
     draw_row(stdscr, y, x, "MTP Acceptance:", f"{acc_rate:.1f}%  ({format_num(accepted)}/{format_num(drafted)})", width, value_color=acc_color)
     y += 1
-    hit_color = COLOR_GREEN if hit >= 70 else COLOR_WARN
-    draw_row(stdscr, y, x, "Cache Hit (tokens):", f"{hit:.1f}%  ({format_num(ctok)}/{format_num(ptok)})", width, value_color=hit_color)
+    if cache_known:
+        hit_color = COLOR_GREEN if hit >= 70 else COLOR_WARN
+        draw_row(stdscr, y, x, "Cache Hit (tokens):", f"{hit:.1f}%  ({format_num(ctok)}/{format_num(ptok)})", width, value_color=hit_color)
+    else:
+        draw_row(stdscr, y, x, "Cache Hit (tokens):", "n/a (server exposes no cached-token metric)", width, value_color=COLOR_DIM)
     y += 1
     draw_box_end(stdscr, y, x, width)
     y += 1
@@ -205,15 +296,16 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
     # ---- Totals ----
     draw_box_start(stdscr, y, x, width, "Totals")
     y += 1
-    draw_row(stdscr, y, x, "Requests:", f"{int(cur['requests_total'])}  (running {int(get_value(cur, 'tensorfold:requests_running'))}, waiting {int(get_value(cur, 'tensorfold:requests_waiting'))})", width)
+    draw_row(stdscr, y, x, "Requests:", f"{int(cur['requests_total'])}  (running {int(cur['requests_running'])}, waiting {int(cur['requests_waiting'])})", width)
     y += 1
     draw_row(stdscr, y, x, "Prompt / Completion:", f"{format_num(cur['prompt_tokens_total'])} / {format_num(cur['completion_tokens_total'])}", width)
     y += 1
     draw_row(stdscr, y, x, "Engine time:", f"prefill {cur['prefill_seconds_total']:.0f}s  decode {cur['decode_seconds_total']:.0f}s  rounds {int(cur['rounds_total'])}", width)
     y += 1
     mp = cur["multi_prefill"]
-    draw_row(stdscr, y, x, "Multi-prefill:", f"chunks {int(mp.get('chunks', 0))}  pieces {int(mp.get('pieces', 0))}  rows {format_num(mp.get('rows', 0))}", width)
-    y += 1
+    if mp:
+        draw_row(stdscr, y, x, "Multi-prefill:", f"chunks {int(mp.get('chunks', 0))}  pieces {int(mp.get('pieces', 0))}  rows {format_num(mp.get('rows', 0))}", width)
+        y += 1
     draw_box_end(stdscr, y, x, width)
     y += 1
 
