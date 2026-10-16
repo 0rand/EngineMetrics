@@ -59,6 +59,59 @@ if __name__ == "__main__":
         cur = mlx_serve.sample("localhost", 8000)
         render("mlx-serve :8000", lambda scr: mlx_serve.draw(
             scr, cur, None, [cur], time.time() - 60, "localhost", 8000, 2, rate_hist=None))
+    elif which in ("tensorfold", "tensorfold-synthetic"):
+        import engines.tensorfold as tf
+        from collections import deque
+
+        def mkt(t, **over):
+            s = {"t": t, "_error": None, "busy": True, "ok": True,
+                 "requests_total": 64.0, "prompt_tokens_total": 2284160.0,
+                 "completion_tokens_total": 33841.0, "generation_tokens_total": 33841.0, "cached_tokens_total": 990144.0,
+                 "rounds_total": 8819.0, "drafted_total": 39069.0, "accepted_total": 16800.0,
+                 "prefill_seconds_total": 47.1, "decode_seconds_total": 538.3,
+                 "pool_tokens": 2138112.0, "pool_free_tokens": 1472512.0,
+                 "kept_prompts": 32.0, "kept_bytes": 2997771520.0, "context_length": 1048576.0,
+                 "streams": {"decoding": 1, "prefilling": 0, "filling": 0, "paused": 0, "max": 4},
+                 "multi_prefill": {"chunks": 0, "pieces": 0, "rows": 0},
+                 "spill_present": True,
+                 "spill_entries": 58.0, "spill_stored_bytes": 51982106624.0,
+                 "spill_written": 8.0, "spill_written_bytes": 2608687616.0,
+                 "spill_loaded": 2.0, "spill_loaded_bytes": 446391808.0, "spill_loaded_tokens": 41344.0,
+                 "spill_restore_ms_p50": 62.7, "spill_restore_ms_p95": 62.7,
+                 "spill_write_failed": 0.0, "spill_crc_failed": 0.0,
+                 "spill_load_failed": 0.0, "spill_load_unfit": 0.0,
+                 "spill_disk_free_bytes": 1697770065920.0,
+                 "tensorfold:requests_running": 1.0, "tensorfold:requests_waiting": 0.0,
+                 "tensorfold:kv_cache_usage_ratio": 0.0,
+                 "tensorfold:request_latency_seconds_sum": 5998.0,
+                 "tensorfold:request_latency_seconds_count": 588.0,
+                 "tensorfold:time_to_first_token_seconds_sum": 1087.0,
+                 "tensorfold:time_to_first_token_seconds_count": 588.0}
+            s.update(over)
+            return s
+
+        if which == "tensorfold":
+            # live: two samples 3s apart against the engine, then render with deltas
+            host, port = "localhost", 8100
+            if len(sys.argv) > 3:
+                host, port = sys.argv[2], int(sys.argv[3])
+            cur = tf.sample(host, port)
+            time.sleep(3)
+            cur2 = tf.sample(host, port)
+            render("tensorfold live :%d" % port, lambda scr: tf.draw(
+                scr, cur2, cur, [cur, cur2], time.time() - 60, host, port, 2, None,
+                rate_hist=None, spill_hist=None, spill_cap=128.0))
+        else:
+            # offline: fabricated sample pair exercising the two-column spill panel
+            a = mkt(1000.0)
+            b = mkt(1010.0, spill_loaded_tokens=41344.0 + 8500.0,
+                    spill_loaded_bytes=446391808.0 + 9.0e7,
+                    spill_written_bytes=2608687616.0 + 3.0e7, spill_written=9.0)
+            hist = deque((time.time() - 24 + i * 2, None if i % 3 == 0 else 3000.0 + i * 100.0)
+                         for i in range(12))
+            render("tensorfold synthetic", lambda scr: tf.draw(
+                scr, b, a, [a, b], time.time() - 60, "localhost", 8100, 2, "glm-5.3-flash",
+                rate_hist=None, spill_hist=hist, spill_cap=128.0))
     elif which == "vllm":
         # live: two samples 3s apart against the engine, then render with deltas
         host, port = "localhost", 8100

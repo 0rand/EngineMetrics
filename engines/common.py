@@ -187,6 +187,8 @@ def format_uptime(seconds):
 
 
 def format_bytes(n):
+    if n >= 1e12:
+        return f"{n/1e12:.2f}T"
     if n >= 1e9:
         return f"{n/1e9:.1f}G"
     if n >= 1e6:
@@ -233,8 +235,8 @@ def draw_row(stdscr, y, x, label, value, width, label_color=COLOR_LABEL, value_c
         pass
 
 
-def draw_bar_row(stdscr, y, x, label, pct, width, color):
-    """Row like '│ Usage: 12.3% [████░░░░]'."""
+def draw_bar_row(stdscr, y, x, label, pct, width, color, suffix=""):
+    """Row like '│ Usage: 12.3% [████░░░░]' (optional 'suffix' after the bar)."""
     if y < 0:
         return
     bar_width = max(10, min(30, width - len(label) - 14))
@@ -244,7 +246,33 @@ def draw_bar_row(stdscr, y, x, label, pct, width, color):
     try:
         stdscr.addstr(y, x, text[:width], curses.color_pair(COLOR_LABEL))
         stdscr.addstr(y, x + len(text), bar[: max(0, width - len(text) - 1)], curses.color_pair(color))
-        stdscr.addstr(y, x + len(text) + len(bar), "]", curses.color_pair(COLOR_LABEL))
+        end = "]" + (f" {suffix}" if suffix else "")
+        stdscr.addstr(y, x + len(text) + len(bar), end[: max(0, width - len(text) - len(bar))], curses.color_pair(COLOR_LABEL))
+    except curses.error:
+        pass
+
+
+def draw_two_col_row(stdscr, y, x, width, left_label, left_value, right_label=None, right_value=None,
+                     left_label_color=COLOR_LABEL, left_value_color=COLOR_VALUE,
+                     right_label_color=COLOR_LABEL, right_value_color=COLOR_VALUE):
+    """One box row with two label/value pairs side by side (right half starts at width//2).
+    Empty labels/values are skipped; segments never bleed past their half."""
+    if y < 0:
+        return
+    split = max(10, width // 2)
+    l_label = f"│ {left_label}"
+    try:
+        stdscr.addstr(y, x, l_label[: min(width, split)], curses.color_pair(left_label_color))
+        if left_value:
+            lv = f" {left_value}"
+            stdscr.addstr(y, x + len(l_label), lv[: max(0, split - len(l_label))], curses.color_pair(left_value_color))
+        if right_label is not None:
+            r_label = f" {right_label}"
+            stdscr.addstr(y, x + split, r_label[: max(0, width - split)], curses.color_pair(right_label_color))
+            if right_value:
+                rv = f" {right_value}"
+                stdscr.addstr(y, x + split + len(r_label),
+                              rv[: max(0, width - split - len(r_label))], curses.color_pair(right_value_color))
     except curses.error:
         pass
 
@@ -270,6 +298,20 @@ def wall_rate(cur, prev, num_key):
     if dt <= 0:
         return None
     return (cur[num_key] - prev[num_key]) / dt
+
+
+def wall_rate_safe(cur, prev, key):
+    """wall_rate that returns None on a negative delta (engine restart) instead
+    of a nonsense negative rate. Use for spill/cache counters."""
+    if prev is None:
+        return None
+    dt = cur["t"] - prev["t"]
+    if dt <= 0:
+        return None
+    d = cur.get(key, 0.0) - prev.get(key, 0.0)
+    if d < 0:
+        return None
+    return d / dt
 
 
 def avg_rate(history, num_key, den_key):

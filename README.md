@@ -19,10 +19,15 @@ Like `htop` for your LLM engine.
 │ TG 120s [100.9]: [·····▄▅▆▇█▇▆▅▄▃·]                                │
 └────────────────────────────────────────────────────────────────────┘
 ┌─ Live Cache ───────────────────────────────────────────────────────┐
-│ Pool occupancy:  11.6%  [░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░]           │
-│ Pool: 226K / 1.9M rows free 1.7M                                   │
-│ Stream KV ratio: 0.0% (per-stream / ctx window)                    │
-│ Kept prompts: 32   context window 1.0M                             │
+│ Pool occupancy:  11.6%  [░░░░░░░░░░░░░░░░░░░░░░░░░░░]              │
+│ Spill fill:  40.5%  [████████████░░░░░░░░░░]  51.8/128 GiB         │
+│ RAM pool                          SSD spill tier (streaming)       │
+│ Pool: 1.4M / 2.1M rows free 741K  Stored: 51.8 GiB (63 entries)    │
+│ Kept prompts: 32 (3.0G)           Written: 5.8 GiB · 13 writes     │
+│ Stream KV ratio: 0.0%             Loaded: 0.4 GiB · 41.3K tok      │
+│ Context window: 1.0M              Restore p50/p95: 62.7 / 62.7 ms  │
+│                                   Failures: 0 · Disk free: 1.69T   │
+│ Restore 120s [8.5K]: [·····▄▅▆▇█▆▅▄▃·]                             │
 └────────────────────────────────────────────────────────────────────┘
 ┌─ Averages (cumulative) ────────────────────────────────────────────┐
 │ Avg Latency: 10.21s  (n=588)                                       │
@@ -62,7 +67,7 @@ exporter, no dependencies.
 | Backend | Detection | What you get |
 |---|---|---|
 | **vLLM** | `vllm:*` keys in `/metrics` | Live PP/TG (engine-time + wall-clock, delta-sampled), 120s sparklines, batch shape (tokens/step), KV occupancy + pool tokens, prefix-cache hit rates (live + cumulative), MTP/spec acceptance with τ and per-position decay, ITL/TTFT/E2E/queue latency with p50/p90/p99 percentiles, preemption warnings, finish-reason accounting, scheduler fairness gauges, tool-call traffic profile, model card from `cache_config_info` |
-| **TensorFold** | `backend: "tensorfold"` in `/health` | Live PP/TG (engine-time + wall-clock), 120s sparklines, stream states, shared-pool occupancy, kept prompts, MTP acceptance, TTFT/latency averages, cache-hit %, multi-prefill stats |
+| **TensorFold** | `backend: "tensorfold"` in `/health` | Live PP/TG (engine-time + wall-clock), 120s sparklines, stream states, shared-pool occupancy, kept prompts, MTP acceptance, TTFT/latency averages, cache-hit %, multi-prefill stats, SSD spill tier panel (stored/written/loaded/restored, fill bar via `--spill-cap`, restore p50/p95, failures, 120s restore sparkline) |
 | **mlx-serve** | `mlx_serve:*` keys in `/metrics` (checked before `vllm:*` — mlx-serve emits both) | Live TG/PP (wall-clock, from `*_live` gauges that include in-flight slots), in-flight prefill progress bar, GPU util + memory footprint, model card (arch/quant/ctx/MTP/resident), 120s sparklines, prefix-cache hit rates, TTFT/latency averages, serial-decode reasons |
 | **oMLX** | `engine_pool` in `/health` (fallback: `models_discovered` in `/api/status`) | Live TG from per-slot `tokens_per_second` (in-flight), native prefill progress bar with ETA (`processed`/`total`/`speed`), loaded-model cards (engine_type/ctx/size), memory pool + pressure levels, cache efficiency, engine cumulative TPS averages, device info (chip/GPU cores), custom-kernel availability |
 
@@ -85,6 +90,7 @@ python3 engine_metrics.py --host localhost --port 8000 --engine omlx   # forced
 | `--engine` | `auto` | Force backend (`vllm` / `tensorfold` / `mlx-serve` / `omlx`) instead of auto-detect |
 | `--interval` | `2` | Refresh seconds |
 | `--window` | `15` | Rate-averaging window (samples) |
+| `--spill-cap` | — | TensorFold spill-tier capacity in GiB; enables the `Spill fill` bar (set to your `SPILL_GIB`, e.g. 128) |
 
 Keys: `q` quit · `r` reset uptime · `c` clear rate history/sparklines.
 
@@ -104,6 +110,16 @@ delta-samples between polls:
   cache-pool occupancy — plus per-stream `kv_cache_usage_ratio` and `kept_prompts`.
 - **MTP acceptance** = `accepted_total` / `drafted_total` — TensorFold counts
   drafted *tokens* (not rounds), so no vLLM-style ×k multiplier.
+- **SSD spill tier** (patch 0088's disk cache, `/health` → `spill`; engines
+  without it keep the old single-column panel): `Stored` is `stored_bytes`,
+  `Written`/`Loaded` are cumulative `written_bytes`/`loaded_bytes` with
+  `(+X/s)` wall-rate deltas between polls — hidden when the window had no
+  progress (honest gap) and suppressed after an engine restart's negative
+  delta. `Restored` tokens = `loaded_tokens`; `Restore p50/p95` are the
+  engine's own restore-latency percentiles; failure counters and disk free
+  round out the health picture. The `Spill fill` bar only appears with
+  `--spill-cap GIB` (your tier's `SPILL_GIB`) — never guessed. The
+  `Restore 120s` sparkline samples restored tok/s exactly like the PP/TG ones.
 - **Averages** = `request_latency_seconds` / `time_to_first_token_seconds`
   histogram sum ÷ count.
 

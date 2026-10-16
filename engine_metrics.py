@@ -66,6 +66,8 @@ def main(stdscr, args):
             state["history"].clear()
             state["prev"] = None
             state["rate_hist"].clear()
+            if "spill_hist" in state:
+                state["spill_hist"].clear()
 
 
 if __name__ == "__main__":
@@ -76,5 +78,7 @@ if __name__ == "__main__":
                         help="force backend type instead of auto-detection (default: auto)")
     parser.add_argument("--interval", type=int, default=2, help="refresh interval seconds (default: 2)")
     parser.add_argument("--window", type=int, default=15, help="rate-averaging window in samples (default: 15)")
+    parser.add_argument("--spill-cap", type=float, default=None, metavar="GIB",
+                        help="TensorFold spill-tier capacity in GiB (enables the 'Spill fill' bar), e.g. 128")
     args = parser.parse_args()
     curses.wrapper(main, args)
