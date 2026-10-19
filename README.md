@@ -90,7 +90,7 @@ python3 engine_metrics.py --host localhost --port 8000 --engine omlx   # forced
 | `--engine` | `auto` | Force backend (`vllm` / `tensorfold` / `mlx-serve` / `omlx`) instead of auto-detect |
 | `--interval` | `2` | Refresh seconds |
 | `--window` | `15` | Rate-averaging window (samples) |
-| `--spill-cap` | — | TensorFold spill-tier capacity in GiB; enables the `Spill fill` bar (set to your `SPILL_GIB`, e.g. 128) |
+| `--spill-cap` | — | TensorFold spill-tier capacity in GiB; fallback for the `Spill fill` bar when `/health` has no `spill.gib` (the engine's configured `SPILL_GIB` is preferred) |
 
 Keys: `q` quit · `r` reset uptime · `c` clear rate history/sparklines.
 
@@ -117,8 +117,9 @@ delta-samples between polls:
   progress (honest gap) and suppressed after an engine restart's negative
   delta. `Restored` tokens = `loaded_tokens`; `Restore p50/p95` are the
   engine's own restore-latency percentiles; failure counters and disk free
-  round out the health picture. The `Spill fill` bar only appears with
-  `--spill-cap GIB` (your tier's `SPILL_GIB`) — never guessed. The
+  round out the health picture. The `Spill fill` bar uses the engine's
+  `/health` `spill.gib` (its configured `SPILL_GIB`); `--spill-cap GIB` is a
+  fallback for older engines — never guessed. The
   `Restore 120s` sparkline samples restored tok/s exactly like the PP/TG ones.
 - **Averages** = `request_latency_seconds` / `time_to_first_token_seconds`
   histogram sum ÷ count.

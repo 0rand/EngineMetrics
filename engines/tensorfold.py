@@ -36,7 +36,7 @@ HEALTH_COUNTERS = [
 # delta-rate math sees flat counters. Older engines without the tier simply
 # don't set spill_present.
 SPILL_FIELDS = [
-    "entries", "stored_bytes", "written", "written_bytes", "loaded",
+    "gib", "entries", "stored_bytes", "written", "written_bytes", "loaded",
     "loaded_bytes", "loaded_tokens", "restore_ms_p50", "restore_ms_p95",
     "write_failed", "crc_failed", "load_failed", "load_unfit", "disk_free_bytes",
 ]
@@ -191,11 +191,12 @@ def draw(stdscr, cur, prev, history, start_time, host, port, interval, model_nam
     else:
         stored = cur["spill_stored_bytes"]
         entries = int(cur["spill_entries"])
-        if spill_cap:
-            fill_pct = stored / (spill_cap * 2 ** 30) * 100
+        cap = cur.get("spill_gib") or spill_cap
+        if cap:
+            fill_pct = stored / (cap * 2 ** 30) * 100
             fill_color = COLOR_GREEN if fill_pct < 70 else COLOR_WARN if fill_pct < 90 else COLOR_RED
             draw_bar_row(stdscr, y, x, "Spill fill:", fill_pct, width, fill_color,
-                         suffix=f"{stored / 2 ** 30:.1f}/{spill_cap:g} GiB")
+                         suffix=f"{stored / 2 ** 30:.1f}/{cap:g} GiB")
             y += 1
         # delta rates: None on engine restart (negative delta) or an idle window — honest gap
         w_rate = wall_rate_safe(cur, prev, "spill_written_bytes")

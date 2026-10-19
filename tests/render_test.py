@@ -73,7 +73,7 @@ if __name__ == "__main__":
                  "kept_prompts": 32.0, "kept_bytes": 2997771520.0, "context_length": 1048576.0,
                  "streams": {"decoding": 1, "prefilling": 0, "filling": 0, "paused": 0, "max": 4},
                  "multi_prefill": {"chunks": 0, "pieces": 0, "rows": 0},
-                 "spill_present": True,
+                 "spill_present": True, "spill_gib": 32.0,
                  "spill_entries": 58.0, "spill_stored_bytes": 51982106624.0,
                  "spill_written": 8.0, "spill_written_bytes": 2608687616.0,
                  "spill_loaded": 2.0, "spill_loaded_bytes": 446391808.0, "spill_loaded_tokens": 41344.0,
